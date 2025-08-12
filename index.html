@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="no">
+<head>
+<meta charset="utf-8" />
+<title>EMT - Drone Jammer</title>
+<style>
+  html, body {
+    margin:0; padding:0; height:100%;
+    background: linear-gradient(to top, #0a2a12, #1d3f5a);
+    color: white;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    user-select:none;
+    display:flex; align-items:center; justify-content:center;
+  }
+  #game {
+    border: 3px solid #0af;
+    box-shadow: 0 0 20px #0affffaa;
+    background: transparent;
+    touch-action: none;
+  }
+  #title {
+    font-size: 64px;
+    font-weight: 900;
+    color: #0af;
+    text-shadow: 0 0 10px #0affff, 0 0 20px #0affff, 0 0 30px #00ffffbb;
+    margin-left: 10px;
+    user-select:none;
+  }
+  #retryBtn {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    padding: 15px 30px;
+    font-size: 24px;
+    background: #0af;
+    color: white;
+    border: none;
+    border-radius: 12px;
+    box-shadow: 0 0 15px #0affff;
+    display: none;
+  }
+</style>
+</head>
+<body>
+<canvas id="game" width="900" height="600"></canvas>
+<button id="retryBtn">Prøv igjen</button>
+<div id="title">EMT</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById("game");
+  const ctx = canvas.getContext("2d");
+  const retryBtn = document.getElementById("retryBtn");
+  const W = canvas.width;
+  const H = canvas.height;
+
+  const building = { x: W/2 - 80, y: H - 300, w: 160, h: 300 };
+  let jammer = { x: building.x + building.w / 2, y: building.y - 20, maxRadius: 150, active: false };
+
+  let keys = {};
+  window.addEventListener("keydown", e => {
+    if(["ArrowLeft","ArrowRight","ArrowUp","ArrowDown","Space"].includes(e.code)) e.preventDefault();
+    keys[e.code] = true;
+  });
+  window.addEventListener("keyup", e => { keys[e.code] = false; });
+
+  // Touch-styring
+  canvas.addEventListener("touchstart", e => { handleTouch(e); jammer.active = true; });
+  canvas.addEventListener("touchmove", e => { handleTouch(e); });
+  canvas.addEventListener("touchend", () => { jammer.active = false; });
+
+  function handleTouch(e) {
+    const rect = canvas.getBoundingClientRect();
+    const touch = e.touches[0];
+    jammer.x = touch.clientX - rect.left;
+    jammer.y = touch.clientY - rect.top;
+    limitJammer();
+    e.preventDefault();
+  }
+
+  function limitJammer() {
+    const centerX = building.x + building.w/2;
+    const centerY = building.y - 20;
+    const maxDist = jammer.maxRadius;
+    let dx = jammer.x - centerX;
+    let dy = jammer.y - centerY;
+    let dist = Math.sqrt(dx*dx + dy*dy);
+    if(dist > maxDist) {
+      dx = dx / dist * maxDist;
+      dy = dy / dist * maxDist;
+      jammer.x = centerX + dx;
+      jammer.y = centerY + dy;
+    }
+  }
+
+  let drones = [];
+  let spawnCooldown = 0;
+  let score = 0;
+  let lives = 3;
+  let propellerAngle = 0;
+
+  const winRows = 12, winCols = 5;
+  let windowLights = [];
+  for(let r=0; r<winRows; r++) {
+    let row = [];
+    for(let c=0; c<winCols; c++) row.push(true);
+    windowLights.push(row);
+  }
+
+  let fallingDrones = [];
+  let explosions = [];
+
+  function drawBuilding() {
+    ctx.fillStyle = "#2b3b4a";
+    ctx.fillRect(building.x, building.y, building.w, building.h);
+    const winW = 20, winH = 15;
+    const gapX = (building.w - winCols * winW) / (winCols + 1);
+    const gapY = (building.h - winRows * winH) / (winRows + 1);
+    for(let r=0; r<winRows; r++) {
+      for(let c=0; c<winCols; c++) {
+        const wx = building.x + gapX + c * (winW + gapX);
+        const wy = building.y + gapY + r * (winH + gapY);
+        ctx.fillStyle = windowLights[r][c] ? "#ffd966" : "#1a1a1a";
+        ctx.fillRect(wx, wy, winW, winH);
+      }
+    }
+  }
+
+  function drawPoliceman(x, y, armUp) {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.fillStyle = "#ffe0bd"; ctx.fillRect(8, 0, 8, 8); // hode
+    ctx.fillStyle = "#003366"; ctx.fillRect(8, -4, 8, 4); // hatt
+    ctx.fillStyle = "#004080"; ctx.fillRect(8, 8, 8, 16); // kropp
+    ctx.fillStyle = "#002244"; ctx.fillRect(8, 24, 4, 8); ctx.fillRect(12, 24, 4, 8); // ben
+    ctx.fillStyle = "#004080";
+    if(armUp) { ctx.fillRect(16, 8, 6, 4); ctx.fillRect(22, 8, 4, 12); }
+    else { ctx.fillRect(16, 20, 6, 4); ctx.fillRect(22, 20, 4, 4); }
+    ctx.restore();
+  }
+
+  function drawDrone(d) {
+    ctx.save();
+    ctx.translate(d.x, d.y);
+    ctx.fillStyle = "#444"; ctx.fillRect(-15, -6, 30, 12);
+    ctx.strokeStyle = "#555"; ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(-20, 0); ctx.lineTo(20, 0);
+    ctx.moveTo(0, -20); ctx.lineTo(0, 20);
+    ctx.stroke();
+    for(let i=0; i<4; i++) {
+      const angle = Math.PI/2 * i;
+      const rx = Math.cos(angle) * 20, ry = Math.sin(angle) * 20;
+      ctx.save();
+      ctx.translate(rx, ry);
+      ctx.rotate(propellerAngle);
+      ctx.fillStyle = "#ccc";
+      ctx.beginPath(); ctx.ellipse(0, 0, 10, 3, 0, 0, Math.PI*2);
+      ctx.fill();
+      ctx.strokeStyle = "#999"; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(-12, 0); ctx.lineTo(12, 0); ctx.stroke();
+      ctx.restore();
+    }
+    ctx.fillStyle = "red";
+    ctx.fillRect(-5, 8, 10, 8); // eksplosiv last
+    ctx.fillStyle = "red";
+    ctx.fillRect(-15, -14, 30 * (d.health / d.maxHealth), 3); // helsebar
+    ctx.restore();
+  }
+
+  function drawExplosion(e) {
+    const alpha = 1 - e.age / e.maxAge;
+    const radius = e.radius * (1 - alpha * 0.5);
+    const grad = ctx.createRadialGradient(e.x, e.y, 0, e.x, e.y, radius);
+    grad.addColorStop(0, `rgba(255,200,50,${alpha})`);
+    grad.addColorStop(0.5, `rgba(255,100,0,${alpha*0.8})`);
+    grad.addColorStop(1, `rgba(100,0,0,0)`);
+    ctx.fillStyle = grad;
+    ctx.beginPath(); ctx.arc(e.x, e.y, radius, 0, Math.PI*2); ctx.fill();
+  }
+
+  function spawnDrone() {
+    let side = Math.floor(Math.random()*3);
+    let x,y;
+    if(side === 0) { x = Math.random()*W; y = -40; }
+    else if(side === 1) { x = -40; y = Math.random()*H*0.7; }
+    else { x = W+40; y = Math.random()*H*0.7; }
+    let dx = (building.x + building.w/2) - x;
+    let dy = (building.y + building.h/2) - y;
+    let len = Math.sqrt(dx*dx + dy*dy);
+    dx /= len; dy /= len;
+    drones.push({x,y,dx,dy,speed:1.2, health:100, maxHealth:100, jamTime:0});
+  }
+
+  function droneHitByJammer(d) {
+    if(!jammer.active) return false;
+    const baseX = building.x + building.w / 2;
+    const baseY = building.y - 20;
+    const lx = jammer.x - baseX, ly = jammer.y - baseY;
+    const dx = d.x - baseX, dy = d.y - baseY;
+    const jammerLength = 350, jammerLen = Math.sqrt(lx*lx + ly*ly);
+    if(jammerLen < 5) return false;
+    const jnx = lx/jammerLen, jny = ly/jammerLen;
+    const proj = dx*jnx + dy*jny;
+    if(proj < 0 || proj > jammerLength) return false;
+    const perpDist = Math.abs(dx*jny - dy*jnx);
+    const coneWidthStart = 20, coneWidthEnd = 140;
+    const coneWidthAtProj = coneWidthStart + (coneWidthEnd - coneWidthStart) * (proj / jammerLength);
+    return perpDist <= coneWidthAtProj/2;
+  }
+
+  function damageWindows(cx, cy, radius) {
+    const winW = 20, winH = 15;
+    const gapX = (building.w - winCols * winW) / (winCols + 1);
+    const gapY = (building.h - winRows * winH) / (winRows + 1);
+    for(let r=0; r<winRows; r++) {
+      for(let c=0; c<winCols; c++) {
+        const wx = building.x + gapX + c * (winW + gapX) + winW/2;
+        const wy = building.y + gapY + r * (winH + gapY) + winH/2;
+        if(Math.hypot(wx - cx, wy - cy) < radius) {
+          windowLights[r][c] = false;
+        }
+      }
+    }
+  }
+
+  function updateDrones() {
+    for(let i = drones.length-1; i>=0; i--) {
+      let d = drones[i];
+      d.x += d.dx * d.speed;
+      d.y += d.dy * d.speed;
+      propellerAngle += 0.2;
+      if(droneHitByJammer(d)) {
+        d.jamTime += 1/60;
+        d.health -= 60 * (1/60);
+        if(d.health <= 0) {
+          fallingDrones.push({x:d.x, y:d.y, vy:0});
+          drones.splice(i,1);
+          continue;
+        }
+      } else {
+        d.jamTime = 0;
+      }
+      if(d.x > building.x - 20 && d.x < building.x + building.w + 20 &&
+         d.y > building.y - 20 && d.y < building.y + building.h + 20) {
+        explosions.push({x:d.x, y:d.y, radius:120, age:0, maxAge:60});
+        damageWindows(d.x, d.y, 80);
+        drones.splice(i, 1);
+        lives--;
+        if(lives <= 0) { gameOver(); return; }
+      }
+    }
+  }
+
+  function updateFallingDrones() {
+    for(let i=fallingDrones.length-1; i>=0; i--) {
+      let fd = fallingDrones[i];
+      fd.vy += 0.5; fd.y += fd.vy;
+      if(fd.y > H) {
+        explosions.push({x:fd.x, y:H-10, radius:150, age:0, maxAge:80});
+        damageWindows(fd.x, fd.y, 100);
+        fallingDrones.splice(i,1);
+      }
+    }
+  }
+
+  function updateExplosions() {
+    for(let i=explosions.length-1; i>=0; i--) {
+      let e = explosions[i];
+      e.age++;
+      if(e.age > e.maxAge) explosions.splice(i,1);
+    }
+  }
+
+  function drawUI() {
+    ctx.fillStyle = "#0af"; ctx.font = "20px Segoe UI";
+    ctx.fillText("Poeng: " + score, 20, 30);
+    ctx.fillText("Liv: " + lives, 20, 60);
+  }
+
+  let gameover = false;
+  function gameOver() { gameover = true; retryBtn.style.display = "block"; }
+
+  function resetGame() {
+    score = 0; lives = 3; drones = []; fallingDrones = []; explosions = [];
+    for(let r=0; r<winRows; r++) for(let c=0; c<winCols; c++) windowLights[r][c] = true;
+    jammer.x = building.x + building.w / 2; jammer.y = building.y - 20; jammer.active = false;
+    gameover = false; retryBtn.style.display = "none";
+  }
+
+  retryBtn.addEventListener("click", resetGame);
+
+  function loop() {
+    ctx.clearRect(0,0,W,H);
+    drawBuilding();
+    if(jammer.active) drawJammerCone();
+    updateJammer();
+    if(!gameover) {
+      if(spawnCooldown <= 0) { spawnDrone(); spawnCooldown = 70 - Math.min(score, 60); }
+      else spawnCooldown--;
+      updateDrones(); updateFallingDrones(); updateExplosions();
+      drones.forEach(drawDrone);
+      fallingDrones.forEach(fd => { drawDrone({x:fd.x, y:fd.y, health:0, maxHealth:1}); });
+      explosions.forEach(drawExplosion);
+      drawPoliceman(building.x + building.w/2 - 8, building.y - 44, jammer.active);
+      drawUI();
+    } else {
+      explosions.forEach(drawExplosion);
+    }
+    requestAnimationFrame(loop);
+  }
+
+  function updateJammer() {
+    if(keys["ArrowLeft"]) jammer.x -= 6;
+    if(keys["ArrowRight"]) jammer.x += 6;
+    if(keys["ArrowUp"]) jammer.y -= 6;
+    if(keys["ArrowDown"]) jammer.y += 6;
+    jammer.active = keys["Space"] || jammer.active;
+    limitJammer();
+  }
+
+  function drawJammerCone() {
+    const baseX = building.x + building.w / 2;
+    const baseY = building.y - 20;
+    const dx = jammer.x - baseX, dy = jammer.y - baseY;
+    ctx.save(); ctx.translate(baseX, baseY); ctx.rotate(Math.atan2(dy, dx));
+    const coneLength = 350, coneWidthStart = 20, coneWidthEnd = 140;
+    let grad = ctx.createRadialGradient(0, 0, coneWidthStart/3, coneLength, 0, coneWidthEnd);
+    grad.addColorStop(0, "rgba(180,220,255,0.7)"); grad.addColorStop(1, "rgba(180,220,255,0)");
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.moveTo(0, -coneWidthStart/2);
+    ctx.lineTo(coneLength, -coneWidthEnd/2);
+    ctx.lineTo(coneLength, coneWidthEnd/2);
+    ctx.lineTo(0, coneWidthStart/2);
+    ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+
+  resetGame();
+  loop();
+})();
+</script>
+</body>
+</html>
